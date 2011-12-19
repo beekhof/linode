@@ -1,13 +1,10 @@
-#!/usr/bin/python3.1
+#!/usr/bin/python
 #
-# Easy Python3 Dynamic DNS
+# Easy Python Dynamic DNS
 # By Jed Smith <jed@jedsmith.org> 4/29/2009
+# Bugfixes and modified for Python2 by Andrew Beekhof <andrew@beekhof.net> 2011
+#
 # This code and associated documentation is released into the public domain.
-#
-# This script **REQUIRES** Python 3.0 or above.  Python 2.6 may work.
-# To see what version you are using, run this:
-#
-#   python --version
 #
 # To use:
 #
@@ -19,35 +16,45 @@
 #
 #   2. Save it.
 #
-#   3. Go back and edit the A record you just created. Make a note of the
-#      ResourceID in the URI of the page while editing the record.
-#
-#   4. Edit the four configuration options below, following the directions for
+#   3. Edit the five configuration options below, following the directions for
 #      each.  As this is a quick hack, it assumes everything goes right.
 #
-# First, the resource ID that contains the 'home' record you created above. If
-# the URI while editing that A record looks like this:
 #
-#  linode.com/members/dns/resource_aud.cfm?DomainID=98765&ResourceID=123456
-#                                                                    ^
-# You want 123456. The API key MUST have write access to this resource ID.
+# If you define an interval (in seconds) here , the script will
+# repeatedly check the DNS entry has the correct value and not
+# terminate
 #
-RESOURCE = "000000"
+INTERVAL = 0
+
+#
+# Domain to which the host belongs
+#
+DOMAIN   = "example.com"
+
+#
+# The host name
+#
+HOST     = "mymachine"
+
 #
 # Your Linode API key.  You can generate this by going to your profile in the
 # Linode manager.  It should be fairly long.
 #
 KEY = "abcdefghijklmnopqrstuvwxyz"
+
 #
-# The URI of a Web service that returns your IP address as plaintext.  You are
-# welcome to leave this at the default value and use mine.  If you want to run
-# your own, the source code of that script is:
+# The URI of a Web service that returns your IP address as plaintext.  
+#
+# To run your own, ensure PHP is enabled for your webserver and place
+# the following source code into ip.php somewhere beneath the docroot.
 #
 #     <?php
 #     header("Content-type: text/plain");
 #     printf("%s", $_SERVER["REMOTE_ADDR"]);
+#     ?>
 #
-GETIP = "http://hosted.jedsmith.org/ip.php"
+GETIP = "http://example.com/ip.php"
+
 #
 # If for some reason the API URI changes, or you wish to send requests to a
 # different URI for debugging reasons, edit this.  {0} will be replaced with the
@@ -84,8 +91,9 @@ DEBUG = False
 
 try:
 	from json import load
-	from urllib.parse import urlencode
-	from urllib.request import urlretrieve
+	from urllib import urlencode
+	from urllib import urlretrieve
+	import time, sys
 except Exception as excp:
 	exit("Couldn't import the standard library. Are you running Python 3?")
 
@@ -99,14 +107,14 @@ def execute(action, parameters):
 	file, headers = urlretrieve(uri)
 	if DEBUG:
 		print("<--", file)
-		print(headers, end="")
+		print headers,
 		print(open(file).read())
 		print()
 	json = load(open(file), encoding="utf-8")
 	if len(json["ERRORARRAY"]) > 0:
 		err = json["ERRORARRAY"][0]
 		raise Exception("Error {0}: {1}".format(int(err["ERRORCODE"]),
-			err["ERRORMESSAGE"]))
+							err["ERRORMESSAGE"]))
 	return load(open(file), encoding="utf-8")
 
 def ip():
@@ -115,33 +123,58 @@ def ip():
 	file, headers = urlretrieve(GETIP)
 	if DEBUG:
 		print("<--", file)
-		print(headers, end="")
+		print headers,
 		print(open(file).read())
 		print()
 	return open(file).read().strip()
 
+def domainid_lookup(name):
+	res = execute("domainList", {})["DATA"]
+	for r in res:
+		if r["DOMAIN"] == DOMAIN:
+			return int(r['DOMAINID'])
+
+	raise Exception("No such domain?".format(DOMAIN))
+
+def check(host, domain):
+	domainID = domainid_lookup(domain)
+	public = ip()
+
+	res = execute("domainResourceList", {"DomainID": domainID})["DATA"]
+	for r in res:
+		if r["NAME"] == host:
+			resourceID = r['RESOURCEID']
+			if DEBUG:
+				print "Got resourceID: %d" % resourceID
+
+			if r["TARGET"] != public:
+				old = r["TARGET"]
+				request = {
+					"ResourceID": r["RESOURCEID"],
+					"DomainID": r["DOMAINID"],
+					"Name": r["NAME"],
+					"Type": r["TYPE"],
+					"Target": public,
+					"TTL_Sec": r["TTL_SEC"]
+					}
+				execute("domainResourceSave", request)
+				print("OK {0} -> {1}".format(old, public))
+				return 1
+			else:
+				print("OK")
+				return 0
+
+	raise Exception("No such host? ".format(host))
+
 def main():
 	try:
-		res = execute("domainResourceGet", {"ResourceID": RESOURCE})["DATA"]
-		if(len(res)) == 0:
-			raise Exception("No such resource?".format(RESOURCE))
-		public = ip()
-		if res["TARGET"] != public:
-			old = res["TARGET"]
-			request = {
-				"ResourceID": res["RESOURCEID"],
-				"DomainID": res["DOMAINID"],
-				"Name": res["NAME"],
-				"Type": res["TYPE"],
-				"Target": public,
-				"TTL_Sec": res["TTL_SEC"]
-			}
-			execute("domainResourceSave", request)
-			print("OK {0} -> {1}".format(old, public))
-			return 1
+		if INTERVAL > 0:
+			while True:
+				check(HOST, DOMAIN)
+				time.sleep(INTERVAL)
 		else:
-			print("OK")
-			return 0
+			return check(HOST, DOMAIN)
+
 	except Exception as excp:
 		print("FAIL {0}: {1}".format(type(excp).__name__, excp))
 		return 2
